@@ -1,12 +1,12 @@
-use sqlx::{PgPool, PgConnection, Connection, Executor};
-use uuid::Uuid;
+use sqlx::{Connection, Executor, PgConnection, PgPool};
 use std::net::TcpListener;
+use uuid::Uuid;
 use zero2prod::configuration::{get_configuration, DatabaseSettings};
 use zero2prod::startup::run;
 
 pub struct TestApp {
     pub address: String,
-    pub db_pool: PgPool
+    pub db_pool: PgPool,
 }
 
 async fn spawn_app() -> TestApp {
@@ -18,14 +18,13 @@ async fn spawn_app() -> TestApp {
     configuration.database.database_name = Uuid::new_v4().to_string();
 
     let connection_pool = configure_database(&configuration.database).await;
-    let server = run(listener, connection_pool.clone())
-        .expect("Failed to bind address.");
+    let server = run(listener, connection_pool.clone()).expect("Failed to bind address.");
 
     let _ = tokio::spawn(server);
 
     TestApp {
         address,
-        db_pool: connection_pool
+        db_pool: connection_pool,
     }
 }
 
