@@ -1,19 +1,26 @@
 use reqwest::Client;
+use secrecy::{Secret, ExposeSecret};
 
 use crate::domain::SubscriberEmail;
 
 pub struct EmailClient {
     http_client: Client,
-    base_url: reqwest::Url,
-    sender: SubscriberEmail
+    base_url: String,
+    sender: SubscriberEmail,
+    authorization_token: Secret<String>
 }
 
 impl EmailClient {
-    pub fn new(base_url: reqwest::Url, sender: SubscriberEmail) -> Self {
+    pub fn new(
+        base_url: String, 
+        sender: SubscriberEmail,
+        authorization_token: Secret<String>
+    ) -> Self {
         Self {
             http_client: Client::new(),
             base_url,
-            sender
+            sender,
+            authorization_token
         }
     }
 
@@ -23,24 +30,35 @@ impl EmailClient {
         subject: &str,
         html_content: &str,
         text_content: &str
-    ) -> Result<(), String> {
-        let url = self.base_url.join("/email");
+    ) -> Result<(), reqwest::Error> {
+        let url = format!("{}/email", self.base_url);
         let request_body = SendEmailRequest {
             from: self.sender.as_ref().to_owned(),
             to: recipient.as_ref().to_owned(),
-            subject: subject.as_ref().to_owned(),
-            html_body: html_content.as_ref().to_owned(),
-            text_body: text_content.as_ref().to_owned()
+            subject: subject.to_owned(),
+            html_body: html_content.to_owned(),
+            text_body: text_content.to_owned()
         };
 
-        let builder = self.http_client.post(url);
+        self
+            .http_client
+            .post(&url)
+            .header(
+                "X-Postmark-Server-Token",
+                self.authorization_token.expose_secret()
+            )
+            .json(&request_body)
+            .send()
+            .await?;
 
         Ok(())
     }
 }
 
+#[derive(serde::Serialize)]
+#[serde(rename_all = "PascalCase")]
 struct SendEmailRequest {
-    from: string,
+    from: String,
     to: String,
     subject: String,
     html_body: String,
@@ -52,19 +70,46 @@ mod tests {
     use crate::domain::SubscriberEmail;
     use crate::email_client::EmailClient;
     use fake::faker::internet::en::SafeEmail;
-    use fake::faker::lorem::en::{Paragraph, Sentence}; use fake::{Fake, Faker};
-    use wiremock::matchers::any;
-    use wiremock::{Mock, MockServer, ResponseTemplate};
-    use crate::{domain::SubscriberEmail, email_client::EmailClient};
+    use fake::faker::lorem::en::{Paragraph, Sentence}; 
+    use fake::{Fake, Faker};
+    use secrecy::Secret;
+    use wiremock::matchers::{header_exists, header, method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate, Request};
+
+    struct SendEmailBodyMatcher;
+
+    impl wiremock::Match for SendEmailBodyMatcher {
+        fn matches(&self, request: &Request) -> bool {
+            let result: Result<serde_json::Value, _> = serde_json::from_slice(&request.body);
+            if let Ok(body) = result {
+                dbg!(&body);
+                body.get("From").is_some() &&
+                body.get("To").is_some() &&
+                body.get("Subject").is_some() &&
+                body.get("HtmlBody").is_some() &&
+                body.get("TextBody").is_some()
+            } else {
+                false
+            }
+        }
+    }
 
     #[tokio::test]
     async fn send_email_fires_a_request_to_base_url() {
         // Arrange
         let mock_server = MockServer::start().await;
         let sender = SubscriberEmail::parse(SafeEmail().fake()).unwrap();
-        let email_client = EmailClient::new(mock_server.uri(), sender);
+        let email_client = EmailClient::new(
+            mock_server.uri(), 
+            sender,
+            Secret::new(Faker.fake())
+        );
 
-        Mock::given(any())
+        Mock::given(header_exists("X-Postmark-Server-Token"))
+            .and(header("Content-Type", "application/json"))
+            .and(path("/email"))
+            .and(method("POST"))
+            .and(SendEmailBodyMatcher)
             .respond_with(ResponseTemplate::new(200))
             .expect(1)
             .mount(&mock_server)
